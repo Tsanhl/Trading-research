@@ -1,0 +1,3 @@
+# OPTIONAL. Core UI/imports/research/calculators do not require these.
+yfinance==1.7.0
+websocket-client==1.9.2

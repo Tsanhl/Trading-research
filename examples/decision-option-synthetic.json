@@ -1,0 +1,26 @@
+{
+  "candidate_id": "synthetic-option-illustration-001",
+  "synthetic": true,
+  "description": "Fictional premium and unverified contract illustration; not a listed-contract or quote assertion.",
+  "instrument": {
+    "kind": "option", "symbol": "SPY260918C00600000", "underlying": "SPY",
+    "strike": 600, "expiry": "2026-09-18", "right": "call", "multiplier": 100
+  },
+  "side": "long",
+  "quantity": 1,
+  "horizon": "swing",
+  "entry": {"price": 2, "unit": "premium"},
+  "stop": {"price": 1, "unit": "premium"},
+  "targets": [{"price": 3, "unit": "premium"}],
+  "known_at": "2026-09-08T14:30:00Z",
+  "decision_at": "2026-09-08T14:30:00Z",
+  "source_known_at": "2026-09-08T14:00:00Z",
+  "data_known_at": "2026-09-08T14:30:00Z",
+  "expires_at": "2026-09-08T15:00:00Z",
+  "provenance": {
+    "source_ids": ["synthetic-source-no-market-evidence"],
+    "data_ids": ["synthetic-data-no-market-evidence"],
+    "rule_id": "schema-illustration-unvalidated",
+    "release_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+}

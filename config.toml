@@ -1,0 +1,82 @@
+[sources]
+kx = "integrated/kx-reference"
+news = "integrated/news-reference"
+
+[policy]
+mode = "research_and_local_simulation"
+broker_execution = false
+notifications = false
+macro_max_age_hours = 36
+monitor_max_age_seconds = 300
+quote_max_age_seconds = 60
+max_clock_skew_seconds = 5
+max_comparison_skew_seconds = 2
+max_difference_bps = 10
+
+[universe]
+structure_references = ["SPY", "SPX", "QQQ"]
+futures_research = ["MES", "ES", "NQ"]
+option_underlyings = ["SPY", "QQQ"]
+intraday_timeframes = ["5m", "1H", "1D"]
+swing_timeframes = ["1D", "1W"]
+
+[webull]
+environment = "sandbox"
+endpoint = "api.sandbox.webull.hk"
+credential_store = "existing_market_sentinel_keychain"
+app_key_env = "WEBULL_APP_KEY"
+app_secret_env = "WEBULL_APP_SECRET"
+keychain_account = "market-sentinel"
+app_key_keychain_service = "market-sentinel-webull-sandbox-app-key"
+app_secret_keychain_service = "market-sentinel-webull-sandbox-app-secret"
+futures_account_permission = "UNVERIFIED"
+futures_market_data_entitlement = "UNVERIFIED"
+sandbox_order_support = "USER_AUTHORIZED_2026_09_08"
+paper_order_confirmation_required = true
+paper_order_market = "US"
+paper_order_types = ["LIMIT"]
+paper_order_time_in_force = ["DAY"]
+paper_order_max_shares = 10
+paper_order_max_notional_usd = 2000.0
+
+[paper]
+# User requested provisional defaults for local backtesting, not broker sizing.
+account_risk_policy = "PRESET_BACKTEST_V1"
+initial_balance_usd = 100000.0
+risk_per_trade_usd = 250.0
+daily_loss_threshold_usd = 1000.0
+max_open_positions_per_test = 1
+overnight = false
+holdout_membership = "NOT_FROZEN"
+broker_orders = false
+webull_paper_orders = true
+webull_per_order_confirmation = true
+
+[backtest]
+version = "intraday-preset-1"
+timeframe = "5m"
+window_bars = 30
+setup_expiry_bars = 12
+reward_risk_target = 2.0
+minimum_entry_reward_risk = 1.5
+entry_cutoff_new_york = "15:30"
+flatten_new_york = "16:00"
+session_open_new_york = "09:30"
+max_futures_contracts = 1
+max_mes_contracts = 2
+max_etf_shares = 100
+etf_fee_per_share_side = 0.005
+etf_min_fee_side = 1.0
+mes_fee_per_contract_side = 1.25
+es_nq_fee_per_contract_side = 2.50
+base_slippage_ticks = 1
+stress_slippage_ticks = 2
+variants = ["breakout", "retest", "retest_ema20"]
+# Costs are deliberately stated assumptions, not verified Webull fee schedules.
+
+[historical_data]
+etf_pages = 3
+etf_symbols = ["SPY", "QQQ"]
+mes_contracts = ["MESH6", "MESM6", "MESU6"]
+es_contracts = ["ESH6", "ESM6", "ESU6"]
+nq_contracts = ["NQH6", "NQM6", "NQU6"]

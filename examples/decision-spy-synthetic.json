@@ -1,0 +1,23 @@
+{
+  "candidate_id": "synthetic-spy-illustration-001",
+  "synthetic": true,
+  "description": "Fictional schema illustration only; no current market recommendation.",
+  "instrument": {"kind": "etf", "symbol": "SPY"},
+  "side": "long",
+  "quantity": 10,
+  "horizon": "intraday",
+  "entry": {"price": 600, "unit": "underlying"},
+  "stop": {"price": 598, "unit": "underlying"},
+  "targets": [{"price": 604, "unit": "underlying"}, {"price": 606, "unit": "underlying"}],
+  "known_at": "2026-09-08T14:30:00Z",
+  "decision_at": "2026-09-08T14:30:00Z",
+  "source_known_at": "2026-09-08T14:00:00Z",
+  "data_known_at": "2026-09-08T14:30:00Z",
+  "expires_at": "2026-09-08T15:00:00Z",
+  "provenance": {
+    "source_ids": ["synthetic-source-no-market-evidence"],
+    "data_ids": ["synthetic-data-no-market-evidence"],
+    "rule_id": "schema-illustration-unvalidated",
+    "release_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+}

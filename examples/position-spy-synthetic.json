@@ -1,0 +1,13 @@
+{
+  "position_id": "synthetic-position-001",
+  "synthetic": true,
+  "origin": "local_paper",
+  "description": "Fictional position for monitor testing only; not a broker position.",
+  "opened_at": "2026-09-08T14:00:00Z",
+  "instrument": {"kind": "etf", "symbol": "SPY"},
+  "side": "long",
+  "quantity": 10,
+  "entry": {"price": 600, "unit": "underlying"},
+  "stop": {"price": 598, "unit": "underlying"},
+  "targets": [{"price": 604, "unit": "underlying"}, {"price": 606, "unit": "underlying"}]
+}

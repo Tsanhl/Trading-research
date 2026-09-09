@@ -1,0 +1,4 @@
+IANA time-zone database TZif subset, public-domain data, copied from the build system.
+Used only as an offline fallback when system zoneinfo is unavailable.
+Sources: https://www.iana.org/time-zones and https://data.iana.org/time-zones/tz-link.html
+Refresh with current system tzdata when timezone laws change. System tzdata takes precedence.

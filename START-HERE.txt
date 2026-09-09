@@ -1,0 +1,65 @@
+LOCAL PROJECT UPDATE — 9 September 2026 / 0.8.1
+Open http://127.0.0.1:8787/#home for Trade: MES/MNQ first, then stocks/options.
+Choose Intraday or Swing. Expand Instruments & data source to select saved, public reference or sandbox data.
+No exact futures observations means WAIT. Refresh now is one sweep; Start/Stop controls bounded polling.
+No new ZIP is required. Start monitoring explicitly.
+The home page now keeps four jobs together: futures/options plans, SPX GEX plus
+the separate SPX/VIX1D expected-range projection, live alerts, and dated reports.
+Enter both timestamped SPX and VIX1D observations for the screenshot-style range;
+the Hub never substitutes VIX or describes that range as GEX/probability.
+Daily/weekly private reports are visible on Trade. Refresh is user-started; a
+missing period is generated from saved evidence when monitoring starts.
+Options: http://127.0.0.1:8787/#options (exact imported/public chain; missing quotes stay theoretical).
+Alerts: Enable browser notifications in Chrome, allow permission, Send test notification, Start monitoring.
+Without notification permission, hiding/leaving the monitor view pauses it. With permission, another tab is allowed.
+Closing the page, Stop, going offline or the session deadline still stops monitoring. No orders are sent by alerts.
+
+TRADING RESEARCH HUB — FREE-FIRST LOCAL 0.8.1
+RESEARCH + CONFIRMED WEBULL HK SANDBOX PAPER ORDERS
+
+START
+1. Open this existing Trading Research Hub project folder.
+2. Install Python 3.11+: https://www.python.org/downloads/
+3. Mac: open START_MAC.command. Windows: open START_WINDOWS.cmd.
+   Linux: run: bash start.sh
+4. Open http://127.0.0.1:8787 and keep the terminal open.
+   Ctrl+C stops the app. Do not open web/index.html directly.
+
+No keys are needed for saved/imported charts, the research library, journal,
+calculators, SPX import/model review, KX context or original backtest reruns.
+
+WEBULL HK PAPER
+Run: python3 scripts/enable_webull_paper.py
+Keep sandbox API credentials only in macOS Keychain or local-data.env. Then open
+Trade lab. Every order requires provider preview and an exact one-use phrase.
+The only enabled scope is Webull HK sandbox, U.S. stock/ETF LIMIT/DAY/CORE,
+1–10 shares and at most USD 2,000. Production, market orders, options, futures,
+short-sale instructions and HK/BCAN orders are disabled.
+
+SPX GEX
+A 368-contract Webull sandbox partial chain is included and saved. It can verify
+supplied-gamma arithmetic, but all rows remain lifecycle-unqualified. Import an
+exact native SPX/SPXW chain for qualified GEX/flip modeling. SPY is never scaled
+into SPX. The app does not scrape Cboe; provider downloads must be manual.
+
+KX
+Kevin structural, price-action and Edgerunner reference logic is integrated into
+this Hub as completed-bar context with immutable lineage. It cannot authorize an
+entry. The original nine KX qualification gates remain blocked.
+
+PORT BUSY
+python3 launch.py --port 8788
+Windows: py -3 launch.py --port 8788
+
+PRIVATE DATA
+Keep this local project private. It contains your research database.
+Read README.md and qa/options-alerts-2026-09-08/TEST-REPORT.md for current verification.
+
+SOURCE REFRESH AND KX ARCHIVE — 8 SEPTEMBER 2026
+Research → Run one bounded source refresh checks public macro feeds and local
+Kevin exports once. No recurring crawler was installed. Brooks inventory is
+searchable; it is not a claim that all books were read or implemented.
+See docs/SOURCE-TO-RULE-COVERAGE-2026-09-08.md for the coverage table and both
+verified KX archive paths outside Desktop. The complete original is retained.
+Webull purchase was reported as app-only: separate OpenAPI futures permission
+is still unverified. No production connection or purchase was made.

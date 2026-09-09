@@ -1,0 +1,10 @@
+{
+  "instrument": {"kind": "etf", "symbol": "SPY"},
+  "synthetic": true,
+  "price": 605,
+  "unit": "underlying",
+  "known_at": "2026-09-08T14:30:00Z",
+  "source_id": "synthetic-quote-no-market-evidence",
+  "environment": "local_simulation",
+  "delayed": false
+}

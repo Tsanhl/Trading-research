@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trading-research-hub"
+version = "0.8.1"
+description = "Private free-first market research dashboard and paper-replay laboratory"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+trading-hub = "trading_hub.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["trading_hub*"]
