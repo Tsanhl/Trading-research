@@ -1,0 +1,812 @@
+//@version=6
+indicator("Simple Quant+ v2.3.0 | Strategy + Chart TF", shorttitle="SQ+ v2.3.0", overlay=false, behind_chart=false, scale=scale.right, precision=4, max_lines_count=8, max_labels_count=10, max_bars_back=1000, dynamic_requests=true)
+
+// v2.3.0: two separate Direction contexts. Strategy TF is selected explicitly;
+// local Direction/MOM/EMA/ADX/Delta/CVD change follow the visible chart.
+// Strategy defaults to 15m for compatibility ONLY, not because it won research.
+// Both contexts calculate the SAME selected rule independently; no voting gate.
+// Session VWAP/CVD remain session anchored. Default RVOL = chart-interval volume
+// versus prior complete sessions at the same elapsed interval (1m interpolation).
+// Flow is a candle-direction ESTIMATE; cash-index ETF proxies remain explicit.
+// Raw MOM/sign are unchanged; 2% ATR deadband affects wording ONLY.
+// No MOM-bias row, 5% sign buffer, new entry engine or 1h/5m gate.
+// Intrabar values can change. Historical HTF requests show confirmed snapshots;
+// LTF-on-HTF plots sample intrabars, not every event. This is NOT a backtest.
+// No time-of-last-update row; internal time/data validity checks are retained.
+// Indicator/research candidate only. Native Pine compile + live QA still needed.
+
+// ── 1. Local live MOM plus explicitly selected strategy basis ────────────────────────────────────────────────────────────
+momLen = input.int(3, "MOM lookback: bars of each context", minval=1, maxval=200, group="1. Live MOM", display=display.none, tooltip="MOM3 in the pane/table follows the CHART. Strategy Direction separately uses MOM3 on the selected strategy TF. Neither context borrows the other context's MOM sign.")
+showSecondMOM = input.bool(true, "Show second LIVE MOM (context only)", group="1. Live MOM", display=display.none)
+mom2Len = input.int(6, "Second MOM lookback: CHART bars", minval=1, maxval=200, group="1. Live MOM", display=display.none, tooltip="Local MOM6 = live chart close - close six chart bars ago. Context only; never a mandatory Direction gate.")
+momMoveAtrFrac = input.float(0.02, "MOM wording deadband: CHART ATR fraction", minval=0.0, maxval=0.50, step=0.01, group="1. Live MOM", display=display.none, tooltip="Wording only: compare live chart MOM with the previous completed chart MOM. Raw value/sign, Direction and alerts are NOT buffered. Setting 0 disables the wording deadband.")
+emaLen = input.int(20, "EMA length", minval=1, maxval=200, group="1. Live MOM", display=display.none, tooltip="Default EMA20. A Direction filter ONLY in combinations containing EMA. Otherwise price context. Hiding the line never changes the selected combination. No candle-close wait.")
+showHistogram = input.bool(false, "Optional histogram of the SAME MOM", group="1. Live MOM", display=display.none, tooltip="OFF by default. This is the same MOM value, not a second period, not MACD and not volume.")
+
+directionMode = input.string("MOM+CVD", "Direction rule (both contexts, independently)", options=["MOM", "MOM+EMA", "MOM+CVD", "MOM+VWAP", "MOM+EMA+CVD", "MOM+EMA+VWAP", "MOM+CVD+VWAP", "MOM+EMA+CVD+VWAP"], group="1. Live MOM", display=display.none, tooltip="Experimental direction description, not a validated entry strategy. Each row independently compares MOM3 and recent same-session CVD change on its own TF. Missing required data = WAIT. No silent fallback; no MOM6, ADX or RVOL gate. Index ETF flow proxies remain explicitly labelled and unqualified.")
+showRiskGuide = input.bool(false, "Show legacy ATR14 / 15m distance PREVIEW", group="1. Live MOM", display=display.none, tooltip="Optional fixed-15m developing ATR14 only: 2xATR stop-distance and 4xATR target-distance illustrations. Not frozen stops/orders or entry alerts. No fill/position state. These distances were not tested by the timeframe pilot.")
+bool useEMAFilter = str.contains(directionMode, "EMA")
+bool useCVDFilter = str.contains(directionMode, "CVD")
+bool useVWAPFilter = str.contains(directionMode, "VWAP")
+signalTF = input.timeframe("15", "Strategy timeframe (15m = baseline, not winner)", options=["5", "15", "30", "60"], group="1. Live MOM", display=display.none, tooltip="Explicit strategy basis, independent of chart zoom/timeframe. Options 5m,15m,30m,1h. A separate Chart Direction follows the visible timeframe. No candidate has passed a full unseen timeframe comparison.")
+
+// ── 2. Volume context: native price/volume and explicit flow proxy ───────
+sessionHours = input.session("0930-1600", "RVOL / VWAP / estimated CVD session", group="2. Volume context", display=display.none)
+sessionZone = input.string("America/New_York", "Session / display time zone", options=["America/New_York", "America/Chicago", "Europe/London", "Etc/UTC", "Exchange"], group="2. Volume context", display=display.none)
+rvolMode = input.string("Chart bar", "RVOL interval", options=["Chart bar", "Session cumulative"], group="2. Volume context", display=display.none, tooltip="Chart bar: current chart interval volume versus prior sessions at the same elapsed interval. Session cumulative: today so far versus historical same-time cumulative volume. Developing current minute is proportionally matched: estimate, not tick-exact history.")
+rvolDays = input.int(20, "RVOL complete comparable sessions", minval=5, maxval=30, group="2. Volume context", display=display.none)
+minSamples = input.int(10, "RVOL minimum samples", minval=3, maxval=30, group="2. Volume context", display=display.none)
+showVWAP = input.bool(true, "Draw VWAP on price chart", group="2. Volume context", display=display.none)
+showFlow = input.bool(true, "Show CHART Delta / session CVD rows", group="2. Volume context", display=display.none, tooltip="Delta covers the current chart-bar/session overlap. Total CVD covers the session; displayed CVD change uses N chart bars. Strategy Direction uses its own N-strategy-bar CVD change internally. All are 1m candle-direction estimates, not verified aggressor flow.")
+cvdLen = input.int(3, "CVD change lookback: bars of each context", minval=1, maxval=100, group="2. Volume context", display=display.none, tooltip="Current session CVD minus its close N bars ago. Strategy uses strategy bars; Chart uses chart bars. No borrowing yesterday's CVD across the session reset. 1h needs three completed same-session bars before CVD delta3 is ready.")
+allowIndexVolume = input.bool(true, "Use vendor INDEX volume for live VWAP / RVOL", group="2. Volume context", display=display.none, tooltip="Uses the SAME index chart's live price and provider-supplied volume. It never substitutes SPY/QQQ price or volume into the index VWAP/RVOL. This is reference analytics, not executable SPX/NDX order flow. Missing provider volume remains N/A.")
+indexFlowMode = input.string("Auto ETF proxy", "Cash-index Delta/CVD source", options=["Auto ETF proxy", "Custom proxy", "Off"], group="2. Volume context", display=display.none, tooltip="SPX uses SPY; NDX uses QQQ. Visible labels identify the proxy. Other indices need Custom proxy. Stocks/ETFs/futures ignore this setting and use their own data. The chosen proxy supplies both the flow rows and any CVD Direction gate. A proxy is not native index flow; no five-day index backtest is claimed.")
+customFlowProxy = input.symbol("AMEX:SPY", "Custom cash-index tradable flow proxy", group="2. Volume context", display=display.none)
+showVWAPLabel = input.bool(false, "Show VWAP end label / source status", group="2. Volume context", display=display.none, tooltip="OFF by default because the VWAP point is shown in the dashboard. Turn ON only if you also want the price-chart end label. The label identifies vendor INDEX volume on indices. If no native VWAP can be calculated, a small N/A status label replaces the line; it is never a fabricated VWAP value.")
+
+// ── 3. Observed daily range and TR, no percentages ────────────────────────────
+diLen = input.int(14, "DMI length", minval=2, maxval=100, group="3. Day range & context", display=display.none)
+adxSmooth = input.int(14, "ADX smoothing", minval=2, maxval=100, group="3. Day range & context", display=display.none)
+showDayBandRow = input.bool(true, "Show ONE daily range / TR row", group="3. Day range & context", display=display.none)
+dayBandMode = input.string("True Range (gap included)", "Daily row and line definition", options=["True Range (gap included)", "Actual Low-High"], group="3. Day range & context", display=display.none, tooltip="Default TRUE RANGE: lower=min(today low, prior daily close); upper=max(today high, prior daily close). Row is lower - upper (upper-lower pts), so a gap may place one bound OUTSIDE today's actual prints. Optional Actual Low-High uses only today's low and high. The table and chart lines always use the SAME chosen definition. Neither is a forecast.")
+showDayBand = input.bool(true, "Draw current daily range / TR boundaries", group="3. Day range & context", display=display.none)
+dayBandColor = input.color(color.rgb(60, 125, 210), "Daily range / TR line color", group="3. Day range & context", display=display.none)
+
+// ── 4. Visuals ─────────────────────────────────────────────────────────────────
+showEMA = input.bool(true, "Draw EMA on price chart", group="4. Display", display=display.none, tooltip="Display only. EMA is a Direction filter ONLY in a combination containing EMA, whether the line is visible or hidden.")
+showPivots = input.bool(true, "Draw Daily P / R1 / S1", group="4. Display", display=display.none, tooltip="Traditional daily pivot points, from the previous completed native 1D high/low/close. Fixed DAILY basis, not Auto. Only the latest daily set is drawn. Independent of the RVOL/VWAP session. Available on intraday and 1D charts; no automatic switch to weekly pivots.")
+pivotPColor = input.color(color.rgb(190, 145, 35), "Daily P: central reference", group="4. Display", display=display.none)
+pivotRColor = input.color(color.red, "Daily R1: resistance reference", group="4. Display", display=display.none)
+pivotSColor = input.color(color.teal, "Daily S1: support reference", group="4. Display", display=display.none)
+showTable = input.bool(true, "Show dashboard on price chart", group="4. Display", display=display.none)
+showPaneBadge = input.bool(true, "Show current MOM value in pane badge", group="4. Display", display=display.none)
+compactTable = input.bool(true, "Compact table (rule stays in Direction tooltip)", group="4. Display", display=display.none)
+showEMArow = input.bool(true, "Show EMA table row", group="4. Display", display=display.none, tooltip="Visibility only. Does not turn an EMA filter on or off.")
+showVWAProw = input.bool(true, "Show VWAP table row", group="4. Display", display=display.none, tooltip="Shows the current VWAP point and whether price is above/below it. Visibility only; it does not turn the VWAP filter on or off.")
+showRVOLrow = input.bool(true, "Show relative-volume row (bottom)", group="4. Display", display=display.none, tooltip="Default BAR mode follows the chart interval. Optional SESSION mode retains cumulative RVOL. Native 1m source and prior-complete-session median; no Direction gate.")
+showADXrow = input.bool(true, "Show ADX table row", group="4. Display", display=display.none)
+showPivotRow = input.bool(true, "Show daily pivot table row", group="4. Display", display=display.none, tooltip="Does not hide the P/R1/S1 chart lines.")
+momLineWidth = input.int(3, "MOM line width", minval=1, maxval=5, group="4. Display", display=display.none)
+tableLocation = input.string("Top right", "Dashboard position", options=["Top right", "Middle right", "Bottom right", "Top left", "Bottom left"], group="4. Display", display=display.none)
+tableSize = input.string("Small", "Dashboard font size", options=["Tiny", "Small", "Normal"], group="4. Display", display=display.none)
+emaColor = input.color(color.orange, "EMA", group="4. Display", display=display.none)
+vwapColor = input.color(color.purple, "VWAP", group="4. Display", display=display.none)
+
+
+// ── Alerts: independent of the always-live display ─────────────────────────────
+liveAlerts = input.bool(false, "Enable STRATEGY direction-change alert() calls", group="5. Alerts", display=display.none, tooltip="Only Strategy Direction can notify. Chart Direction and local MOM are informational and cannot create alerts. Live direction changes are not entry orders. Recreate saved TradingView alerts after changing script/settings.")
+notifyWAIT = input.bool(false, "Also notify a valid transition to WAIT", group="5. Alerts", display=display.none, tooltip="OFF by default. Does not affect the live table. Missing data or a session reset is not a trade exit and creates no delayed BULL/BEAR notification on recovery.")
+alertCooldown = input.int(30, "Live alert cooldown seconds (DISPLAY IS NOT DELAYED)", minval=15, maxval=600, group="5. Alerts", display=display.none, tooltip="Limits only notifications, not MOM or direction updates. A transition suppressed during cooldown is discarded, never sent later as if still new.")
+
+string panelPosition = tableLocation == "Middle right" ? position.middle_right : tableLocation == "Bottom right" ? position.bottom_right : tableLocation == "Top left" ? position.top_left : tableLocation == "Bottom left" ? position.bottom_left : position.top_right
+string panelTextSize = tableSize == "Tiny" ? size.tiny : tableSize == "Normal" ? size.normal : size.small
+string zone = sessionZone == "Exchange" ? syminfo.timezone : sessionZone
+int startMins = int(str.tonumber(str.substring(sessionHours, 0, 2))) * 60 + int(str.tonumber(str.substring(sessionHours, 2, 4)))
+int endMins = int(str.tonumber(str.substring(sessionHours, 5, 7))) * 60 + int(str.tonumber(str.substring(sessionHours, 7, 9)))
+int sessionMinutes = endMins > startMins ? endMins - startMins : 1440 - startMins + endMins
+bool sessionTF = timeframe.isminutes and timeframe.multiplier <= 60
+bool isIndex = syminfo.type == "index"
+bool volumeAllowed = not isIndex or allowIndexVolume
+string autoProxy = syminfo.ticker == "SPX" ? "AMEX:SPY" : syminfo.ticker == "NDX" ? "NASDAQ:QQQ" : ""
+string indexProxy = indexFlowMode == "Custom proxy" ? customFlowProxy : indexFlowMode == "Auto ETF proxy" ? autoProxy : ""
+bool proxyConfigured = isIndex and indexProxy != "" and ticker.standard(indexProxy) != ticker.standard(syminfo.tickerid)
+string flowTicker = isIndex ? (proxyConfigured ? indexProxy : syminfo.tickerid) : syminfo.tickerid
+bool flowProxy = isIndex and proxyConfigured
+bool flowAllowed = (showFlow or useCVDFilter) and (not isIndex or proxyConfigured)
+if barstate.isfirst
+    if minSamples > rvolDays
+        runtime.error("RVOL minimum samples cannot exceed history length.")
+    if not chart.is_standard
+        runtime.error("Use standard time-based Candles or Bars, not synthetic charts.")
+    if not (timeframe.isseconds or timeframe.isminutes or timeframe.isdaily or timeframe.isweekly or timeframe.ismonthly)
+        runtime.error("Use a time-based chart, not a tick-interval chart.")
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+f_num(float v) =>
+    na(v) ? "N/A" : str.tostring(v, "0.00")
+f_mom(float v) =>
+    na(v) ? "N/A" : v != 0 and math.abs(v) < 0.00000001 ? (v > 0 ? "+<1e-8" : "-<1e-8") : (v > 0 ? "+" : "") + str.tostring(v, "0.00######")
+f_price(float v) =>
+    na(v) ? "N/A" : str.tostring(v, format.mintick)
+f_vol(float v) =>
+    na(v) ? "N/A" : (v > 0 ? "+" : "") + str.tostring(v, format.volume)
+f_mom_state(float momValue, float move) =>
+    na(momValue) or na(move) ? "? N/A" : move > 0 ? (momValue < 0 ? "↑ RECOVERING" : momValue > 0 ? "↑ STRENGTHENING" : "↑ IMPROVING") : move < 0 ? (momValue > 0 ? "↓ FADING" : momValue < 0 ? "↓ DETERIORATING" : "↓ WEAKENING") : "→ FLAT"
+f_mom_display(float momValue, float move) =>
+    f_mom(momValue) + " | " + f_mom_state(momValue, move)
+f_bias(int d) =>
+    d == 1 ? "BULL" : d == -1 ? "BEAR" : "WAIT"
+f_color(int d) =>
+    d == 1 ? color.teal : d == -1 ? color.red : color.gray
+f_move_color(float d) =>
+    na(d) ? color.gray : d > 0 ? color.green : d < 0 ? color.red : color.gray
+f_adx_strength(float adxValue, float adxMove, float plusValue, float minusValue) =>
+    if na(adxValue)
+        "N/A"
+    else
+        string side = plusValue > minusValue ? "BULL" : minusValue > plusValue ? "BEAR" : "NEUTRAL"
+        string strength = adxValue >= 25 ? "TREND" : adxValue >= 20 ? "BUILDING" : "WEAK"
+        string moveTxt = na(adxMove) ? "" : adxMove > 0 ? " | STRENGTHENING" : adxMove < 0 ? " | EASING" : " | FLAT"
+        side + " " + strength + " | " + f_num(adxValue) + moveTxt
+f_time(int t) =>
+    na(t) ? "N/A" : str.format_time(t, "MM-dd HH:mm", zone)
+f_symbol_name(string symbol) =>
+    array<string> parts = str.split(symbol, ":")
+    array.get(parts, array.size(parts) - 1)
+f_row(table t, int row, string title, string value, color c, string tip) =>
+    table.cell(t, 0, row, title, text_color=chart.fg_color, text_size=panelTextSize, text_halign=text.align_left, tooltip=tip)
+    table.cell(t, 1, row, "  " + value + "  ", text_color=c, text_size=panelTextSize, text_halign=text.align_left, tooltip=tip)
+f_true_range(float hi, float lo, float pc) =>
+    na(hi) or na(lo) or na(pc) or hi < lo ? na : math.max(hi - lo, math.max(math.abs(hi - pc), math.abs(lo - pc)))
+f_session_bounds(int barTime, string tz, int openMins, int closeMins) =>
+    int clockMins = hour(barTime, tz) * 60 + minute(barTime, tz)
+    int localNoon = timestamp(tz, year(barTime, tz), month(barTime, tz), dayofmonth(barTime, tz), 12, 0)
+    int startDay = localNoon - (clockMins < openMins ? 86400000 : 0)
+    int endDay = startDay + (closeMins <= openMins ? 86400000 : 0)
+    int startTime = timestamp(tz, year(startDay, tz), month(startDay, tz), dayofmonth(startDay, tz), int(openMins / 60), openMins % 60)
+    int endTime = timestamp(tz, year(endDay, tz), month(endDay, tz), dayofmonth(endDay, tz), int(closeMins / 60), closeMins % 60)
+    [startTime, endTime]
+
+type VolumeSession
+    array<float> cumulative
+
+// Native 1m state. Normal rollback rebuilds a provisional minute once; no
+// varip volume accumulation. An invalid bar immediately clears both outputs.
+f_volume_packet(simple bool computeRVOL) =>
+    [sStart, sEnd] = f_session_bounds(time, zone, startMins, endMins)
+    bool inside = time >= sStart and time < sEnd
+    bool usualDuration = sEnd - sStart == sessionMinutes * 60000
+    var array<VolumeSession> history = array.new<VolumeSession>(0)
+    var array<float> today = array.new<float>(computeRVOL ? sessionMinutes : 0, na)
+    var array<float> samples = array.new<float>(0)
+    var int active = na
+    var int archivedSession = na
+    var int previousClose = na
+    var bool good = false
+    var string failure = "WARMING UP"
+    var float cumV = 0.0
+    var float cumPV = 0.0
+    var float vw = na
+    var float rv = na
+    var int n = 0
+    var int asof = na
+    var string vs = "NO 1m DATA"
+    var string rs = "NO 1m DATA"
+    if inside
+        bool newSession = na(active) or active != sStart
+        if newSession
+            active := sStart
+            good := time == sStart and usualDuration
+            failure := not usualDuration ? "DST SESSION" : time != sStart ? "MISSING OPEN" : "OK"
+            cumV := 0.0
+            cumPV := 0.0
+            previousClose := na
+            if computeRVOL
+                array.fill(today, na)
+        else if na(previousClose) or time != previousClose
+            good := false
+            failure := "1m GAP"
+        if not usualDuration
+            good := false
+            failure := "DST SESSION"
+        else if na(time_close) or time_close - time != 60000 or time_close > sEnd
+            good := false
+            failure := "BAD 1m BAR"
+        else if na(volume) or volume < 0
+            good := false
+            failure := "NO VOLUME"
+        else if na(open) or na(high) or na(low) or na(close) or high < math.max(open, close) or low > math.min(open, close) or high < low
+            good := false
+            failure := "INVALID OHLC"
+        previousClose := time_close
+        asof := math.min(timenow, time_close)
+        vw := na
+        rv := na
+        n := 0
+        if good
+            cumV += volume
+            cumPV += hlc3 * volume
+            vw := cumV > 0 ? cumPV / cumV : na
+            vs := na(vw) ? "NO VOLUME" : "OK"
+            if computeRVOL
+                int slot = int((time - sStart) / 60000)
+                int chartParent = time(timeframe.main_period)
+                int intervalStart = rvolMode == "Chart bar" ? math.max(chartParent, sStart) : sStart
+                int priorSlot = int((intervalStart - sStart) / 60000) - 1
+                bool aligned = not na(chartParent) and intervalStart >= sStart and intervalStart <= time and (intervalStart - sStart) % 60000 == 0
+                if slot >= 0 and slot < sessionMinutes and aligned
+                    array.set(today, slot, cumV)
+                    float beforeNow = priorSlot >= 0 ? array.get(today, priorSlot) : 0.0
+                    float currentInterval = not na(beforeNow) ? cumV - beforeNow : na
+                    float progress = math.max(0.0, math.min(1.0, float(asof - time) / 60000.0))
+                    array.clear(samples)
+                    if array.size(history) > 0
+                        for d = 0 to array.size(history) - 1
+                            VolumeSession prior = array.get(history, d)
+                            float full = array.get(prior.cumulative, slot)
+                            float beforeMinute = slot > 0 ? array.get(prior.cumulative, slot - 1) : 0.0
+                            float beforeInterval = priorSlot >= 0 ? array.get(prior.cumulative, priorSlot) : 0.0
+                            if not na(full) and not na(beforeMinute) and not na(beforeInterval) and full >= beforeMinute and beforeMinute >= beforeInterval
+                                float matched = beforeMinute + (full - beforeMinute) * progress - beforeInterval
+                                if matched >= 0
+                                    array.push(samples, matched)
+                    n := array.size(samples)
+                    float baseline = n >= minSamples ? array.median(samples) : na
+                    rv := not na(currentInterval) and currentInterval >= 0 and not na(baseline) and baseline > 0 ? currentInterval / baseline : na
+                    rs := na(currentInterval) ? "INTERVAL GAP" : n < minSamples ? "SAMPLES " + str.tostring(n) + "/" + str.tostring(minSamples) : na(baseline) or baseline <= 0 ? "ZERO BASELINE" : "OK"
+                    // Archive only a complete session and only AFTER its comparison.
+                    if time_close == sEnd and asof >= sEnd and cumV > 0 and (na(archivedSession) or archivedSession != active)
+                        array.push(history, VolumeSession.new(array.copy(today)))
+                        archivedSession := active
+                        if array.size(history) > rvolDays
+                            array.shift(history)
+                else
+                    rs := "CHART INTERVAL ALIGNMENT"
+            else
+                rs := "OFF"
+        else
+            vs := failure
+            rs := failure
+    [vw, rv, n, active, asof, vs, rs, time, time_close]
+
+// One independent accumulator per request context. Lookback snapshots belong
+// to the requested basis, not to the host chart or the number of script updates.
+f_flow_packet(simple string basisTF) =>
+    bool canFlow = syminfo.type != "index"
+    var int polarity = 0
+    if close > open
+        polarity := 1
+    else if close < open
+        polarity := -1
+    else if not na(close[1]) and close > close[1]
+        polarity := 1
+    else if not na(close[1]) and close < close[1]
+        polarity := -1
+    [sStart, sEnd] = f_session_bounds(time, zone, startMins, endMins)
+    bool inside = time >= sStart and time < sEnd
+    int currentParent = time(basisTF)
+    int currentParentEnd = time_close(basisTF)
+    var int active = na
+    var int previousClose = na
+    var bool good = false
+    var string failure = "WARMING UP"
+    var float cumV = 0.0
+    var float cv = 0.0
+    var float unknown = 0.0
+    var int parentOpen = na
+    var int parentEnd = na
+    var int parentMinuteCount = 0
+    var float dv = 0.0
+    var float parentUnknown = 0.0
+    var array<float> completed = array.new<float>(0)
+    var int asof = na
+    if inside
+        bool newSession = na(active) or active != sStart
+        if newSession
+            active := sStart
+            good := time == sStart and sEnd - sStart == sessionMinutes * 60000
+            failure := good ? "OK" : "MISSING OPEN / DST SESSION"
+            previousClose := na
+            cumV := 0.0
+            cv := 0.0
+            unknown := 0.0
+            parentOpen := currentParent
+            parentEnd := currentParentEnd
+            parentMinuteCount := 0
+            dv := 0.0
+            parentUnknown := 0.0
+            array.clear(completed)
+        else if na(previousClose) or time != previousClose
+            good := false
+            failure := "1m GAP"
+        if not newSession and currentParent != parentOpen
+            int expectedMinutes = int((math.min(parentEnd, sEnd) - math.max(parentOpen, sStart)) / 60000)
+            if good and parentMinuteCount == expectedMinutes and expectedMinutes > 0 and parentUnknown == 0
+                // A clipped opening bar can contribute session CVD, but cannot
+                // be used as a complete lookback bar of the requested context.
+                if parentOpen >= sStart
+                    array.push(completed, cv)
+                    if array.size(completed) > cvdLen
+                        array.shift(completed)
+            else
+                good := false
+                failure := "FLOW WINDOW GAP"
+            parentOpen := currentParent
+            parentEnd := currentParentEnd
+            parentMinuteCount := 0
+            dv := 0.0
+            parentUnknown := 0.0
+        if na(currentParent) or na(currentParentEnd) or currentParent > time or currentParentEnd < time_close
+            good := false
+            failure := "PARENT ALIGNMENT"
+        else if na(time_close) or time_close - time != 60000 or time_close > sEnd
+            good := false
+            failure := "BAD 1m BAR"
+        else if na(volume) or volume < 0
+            good := false
+            failure := "NO VOLUME"
+        else if na(open) or na(high) or na(low) or na(close) or high < math.max(open, close) or low > math.min(open, close) or high < low
+            good := false
+            failure := "INVALID OHLC"
+        previousClose := time_close
+        asof := math.min(timenow, time_close)
+        if good
+            cumV += volume
+            cv += canFlow ? polarity * volume : 0.0
+            dv += canFlow ? polarity * volume : 0.0
+            parentMinuteCount += 1
+            if polarity == 0 and volume > 0
+                unknown += volume
+                parentUnknown += volume
+    int n = array.size(completed)
+    bool valid = canFlow and good and unknown == 0 and cumV > 0
+    float currentCvd = valid ? cv : na
+    float currentDelta = canFlow and good and parentUnknown == 0 and parentMinuteCount > 0 ? dv : na
+    float change = valid and n >= cvdLen ? cv - array.get(completed, 0) : na
+    string status = not canFlow ? "NOT TRADABLE" : not good ? failure : unknown > 0 ? "UNCLASSIFIED VOLUME" : cumV <= 0 ? "NO VOLUME" : "EST 1m"
+    [currentCvd, currentDelta, change, n, active, asof, parentOpen, status, time, time_close]
+
+// Runs inside BOTH the strategy context and the native chart context. Nested
+// 1m requests are mapped to THAT context first, so historical price and CVD
+// snapshots are not mixed from different parent bars. No lookahead_on prices.
+f_core(simple string basisTF) =>
+    float m = close - close[momLen]
+    float m2 = close - close[mom2Len]
+    float e = ta.ema(close, emaLen)
+    float a = ta.atr(14)
+    [pdi, mdi, ax] = ta.dmi(diLen, adxSmooth)
+    bool mOK = not na(m)
+    bool m2OK = not na(m2)
+    bool eOK = bar_index >= emaLen - 1 and not na(e)
+    bool supported = timeframe.isminutes and timeframe.multiplier <= 60
+    int cutoff = math.min(timenow, time_close)
+    [sStart, sEnd] = f_session_bounds(math.max(time, cutoff - 1), zone, startMins, endMins)
+    bool inside = time < sEnd and time_close > sStart and cutoff > sStart and cutoff <= sEnd
+    bool priceClockOK = not barstate.isrealtime or (timenow >= time and timenow <= time_close + 90000)
+    float cv = na
+    float dv = na
+    float change = na
+    int historyBars = 0
+    int flowAsOf = na
+    bool aligned = false
+    string flowStatus = not supported ? "USE 1-60m" : not flowAllowed ? "FLOW OFF / SELECT PROXY" : "OFF SESSION"
+    if supported and flowAllowed
+        [fc, fd, fr, fn, fs, fa, fp, fst, _, _] = request.security(flowTicker, "1", f_flow_packet(basisTF), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true, calc_bars_count=50000)
+        bool timeOK = inside and fs == sStart and fp == time and not na(fa) and fa <= cutoff + 1000 and fa >= math.max(time, cutoff - 90000)
+        if timeOK
+            cv := fc
+            dv := fd
+            change := fr
+            historyBars := fn
+            flowAsOf := fa
+            aligned := true
+            flowStatus := fst
+        else
+            flowStatus := not inside ? "OFF SESSION" : fs != sStart ? "OTHER SESSION" : fp != time ? "PARENT GAP" : "1m SOURCE LAG"
+    float vw = na
+    bool vwOK = false
+    if supported and volumeAllowed and useVWAPFilter
+        [v, _, _, vsid, va, _, _, _, _] = request.security(syminfo.tickerid, "1", f_volume_packet(false), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true, calc_bars_count=50000)
+        vwOK := inside and vsid == sStart and not na(v) and not na(va) and va <= cutoff + 1000 and va >= math.max(sStart, cutoff - 90000)
+        vw := vwOK ? v : na
+    bool flowOK = aligned and not na(change)
+    bool ready = supported and inside and priceClockOK and mOK and (not useEMAFilter or eOK) and (not useCVDFilter or flowOK) and (not useVWAPFilter or vwOK)
+    bool bull = m > 0 and (not useEMAFilter or close > e) and (not useCVDFilter or change > 0) and (not useVWAPFilter or close > vw)
+    bool bear = m < 0 and (not useEMAFilter or close < e) and (not useCVDFilter or change < 0) and (not useVWAPFilter or close < vw)
+    int direction = not ready ? 0 : bull ? 1 : bear ? -1 : 0
+    string why = not supported ? "USE 1-60m" : not inside ? "OFF SESSION" : not priceClockOK ? "PRICE FEED CHECK" : not mOK ? "MOM WARMUP" : useEMAFilter and not eOK ? "EMA WARMUP" : useCVDFilter and not flowOK ? (aligned and not na(cv) ? "CVD " + str.tostring(historyBars) + "/" + str.tostring(cvdLen) + " bars" : flowStatus) : useVWAPFilter and not vwOK ? "VWAP DATA" : m == 0 ? "MOM = 0" : useCVDFilter and (change == 0 or m * change < 0) ? "MOM / CVD CONFLICT" : useEMAFilter and (m > 0 ? close <= e : close >= e) ? "EMA CONFLICT" : useVWAPFilter and (m > 0 ? close <= vw : close >= vw) ? "VWAP CONFLICT" : "AGREE"
+    [direction, ready, why, close, close[momLen], close[mom2Len], m, m2, e, a, pdi, mdi, ax, m[1], m2[1], ax[1], time, time_close, cv, dv, change, historyBars, flowAsOf, flowStatus, aligned, mOK, m2OK, sStart]
+
+// Explicit strategy snapshot; no dependence on the displayed local MOM values.
+[strategyDirection, strategyReady, strategyWhy, strategyClose, strategyRef, strategyRef2, strategyMOM, strategyMOM2, strategyEMA, strategyATR, strategyPlusDI, strategyMinusDI, strategyADX, strategyMPrev, strategyM2Prev, strategyADXPrev, strategyStart, strategyEnd, strategyCVD, strategyDelta, strategyChange, strategyHistory, strategyAsOf, strategyFlowStatus, strategyAligned, strategyMOMReady, strategyMOM2Ready, strategySession] = request.security(syminfo.tickerid, signalTF, f_core(signalTF), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true, calc_bars_count=1500)
+// Local packet evaluated directly on the visible chart.
+[chartDirection, chartReady, chartWhy, localClose, momRef, mom2Ref, mom, mom2, ema, momATR, plusDI, minusDI, adx, momPrevious, mom2Previous, adxPrevious, localStart, localEnd, sessionCVD, barDelta, cvdRecentChange, cvdHistoryBars, flowAsOf, flowStatus, flowClockAligned, momReady, mom2Ready, localSession] = f_core(timeframe.period)
+float momMoveBand = momMoveAtrFrac == 0 ? 0.0 : not na(momATR) ? math.max(syminfo.mintick, momATR * momMoveAtrFrac) : syminfo.mintick
+float momMoveRaw = mom - momPrevious
+float mom2MoveRaw = mom2 - mom2Previous
+float momArrowChange = na(momMoveRaw) ? na : math.abs(momMoveRaw) <= momMoveBand ? 0.0 : momMoveRaw
+float mom2ArrowChange = na(mom2MoveRaw) ? na : math.abs(mom2MoveRaw) <= momMoveBand ? 0.0 : mom2MoveRaw
+bool openRealtimeBar = barstate.isrealtime and timenow < time_close
+string tfText = timeframe.isminutes ? str.tostring(timeframe.multiplier) + "m" : timeframe.period
+string strategyTFText = signalTF == "60" ? "1h" : signalTF + "m"
+string flowName = f_symbol_name(flowTicker)
+string flowSuffix = flowProxy ? " " + flowName + "*" : ""
+
+// Independent native-volume display. Session anchors must follow observation
+// time, NOT a stale previously completed strategy bar on a smaller host chart.
+int chartCutoff = math.min(timenow, time_close)
+[expectedSessionStart, expectedSessionEnd] = f_session_bounds(math.max(time, chartCutoff - 1), zone, startMins, endMins)
+float sessionVWAP = na
+float rvol = na
+int rvolN = 0
+bool volumeIsReference = false
+bool vwapInThisBar = false
+string vwapStatus = not sessionTF ? "USE 1-60m" : not volumeAllowed ? "INDEX VOLUME OFF" : "OFF SESSION"
+string rvolStatus = vwapStatus
+if sessionTF and volumeAllowed
+    [v, rv, n, sid, stamp, vs, rs, _, _] = request.security(syminfo.tickerid, "1", f_volume_packet(true), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off, ignore_invalid_symbol=true, calc_bars_count=50000)
+    bool same = sid == expectedSessionStart
+    bool ref = same and stamp == expectedSessionEnd and chartCutoff >= expectedSessionEnd
+    bool fresh = same and chartCutoff > expectedSessionStart and chartCutoff <= expectedSessionEnd and not na(stamp) and stamp <= chartCutoff + 1000 and stamp >= math.max(expectedSessionStart, chartCutoff - 90000)
+    if fresh or ref
+        sessionVWAP := v
+        rvol := rv
+        rvolN := n
+        volumeIsReference := ref
+        vwapInThisBar := fresh and not na(v)
+        vwapStatus := ref ? "LAST" : vs
+        rvolStatus := ref ? "LAST" : rs
+    else
+        vwapStatus := not same ? "OTHER SESSION" : chartCutoff > expectedSessionEnd ? "OFF SESSION" : "1m SOURCE LAG"
+        rvolStatus := vwapStatus
+
+// Strategy-only notifications. First load, data recovery and session rollover
+// establish a baseline without emitting a belated direction alert.
+varip int observedDirection = na
+varip int observedSession = na
+varip int lastSentAt = na
+varip int liveEventNumber = 0
+bool sameObservedSession = not na(observedSession) and strategySession == observedSession
+bool liveChanged = barstate.isrealtime and strategyReady and sameObservedSession and not na(observedDirection) and strategyDirection != observedDirection
+bool mayNotify = na(lastSentAt) or timenow - lastSentAt >= alertCooldown * 1000
+if barstate.isrealtime
+    if liveAlerts and liveChanged and mayNotify and (strategyDirection != 0 or notifyWAIT)
+        liveEventNumber += 1
+        string key = "SQ230|" + syminfo.tickerid + "|STRATEGY " + strategyTFText + "|" + str.tostring(strategyStart) + "|" + str.tostring(timenow) + "|" + str.tostring(liveEventNumber)
+        alert(key + " | " + directionMode + " | " + f_bias(strategyDirection) + " | price " + f_price(strategyClose) + " | MOM " + f_mom(strategyMOM) + " | CVD Δ" + str.tostring(cvdLen) + " EST " + f_vol(strategyChange) + " | source " + flowTicker + (flowProxy ? " PROXY" : " NATIVE") + " | " + strategyWhy + " | DIRECTION ONLY; NO ENTRY/EXIT ORDER", alert.freq_all)
+        lastSentAt := timenow
+    observedDirection := strategyReady ? strategyDirection : na
+    observedSession := strategyReady ? strategySession : na
+
+// The optional legacy risk PREVIEW deliberately remains fixed 15m. No link to
+// either Direction and no claimed fills, stops or targets from the pilot.
+float riskATR = showRiskGuide ? request.security(syminfo.tickerid, "15", ta.atr(14), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off) : na
+string riskGuide = "ATR " + f_price(riskATR) + " | SL distance " + f_price(2.0 * riskATR) + " | TP distance " + f_price(4.0 * riskATR)
+string riskTip = "Legacy fixed-15m developing ATR14 distance PREVIEW only. Not frozen orders; no entry, position, stop or exit engine. Do not widen a real stop when this value changes. No risk-performance validation in the timeframe pilot."
+
+// ── Observed Day LOW..HIGH and gap-aware TR, both developing ───────────────────
+bool trOnDailyChart = timeframe.isdaily and timeframe.multiplier == 1
+bool trOnIntradayChart = timeframe.isseconds or timeframe.isminutes
+bool trTimeframeOK = trOnDailyChart or trOnIntradayChart
+int trChartDay = time("1D")
+// Native DAILY H/L/C use [1]; unshifted time is only the current-period ID.
+float dailyPrevHigh = na
+float dailyPrevLow = na
+float dailyPrevClose = na
+int dailyStart = na
+int dailyPrevStart = na
+int dailyPrevEnd = na
+if trOnIntradayChart
+    [dHigh, dLow, dClose, dStart, dPrevStart, dPrevEnd] = request.security(syminfo.tickerid, "1D", [high[1], low[1], close[1], time, time[1], time_close[1]], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on, ignore_invalid_symbol=true)
+    dailyPrevHigh := dHigh
+    dailyPrevLow := dLow
+    dailyPrevClose := dClose
+    dailyStart := dStart
+    dailyPrevStart := dPrevStart
+    dailyPrevEnd := dPrevEnd
+else if trOnDailyChart
+    dailyPrevHigh := high[1]
+    dailyPrevLow := low[1]
+    dailyPrevClose := close[1]
+    dailyStart := time
+    dailyPrevStart := time[1]
+    dailyPrevEnd := time_close[1]
+
+var int trActiveDay = na
+var int trTradingDate = na
+var int trAsOf = na
+var float trDayHigh = na
+var float trDayLow = na
+var float trPreviousClose = na
+var float dayTR = na
+var float dayRangeWidth = na
+var bool trFullStart = false
+var bool trPricesOK = false
+var string dayRangeStatus = "WARMING UP"
+var string dayTRStatus = "WARMING UP"
+
+if trTimeframeOK
+    bool trNewDay = na(trActiveDay) or trActiveDay != trChartDay
+    bool trPriceOK = not na(high) and not na(low) and high >= low
+    if trNewDay
+        // A first-loaded midday fragment must not masquerade as a full day.
+        // Rollover means coverage from the first supplied bar, not certified tape.
+        bool trObservedRollover = not barstate.isfirst and not na(trChartDay[1]) and trChartDay != trChartDay[1]
+        trFullStart := trOnDailyChart or time == trChartDay or trObservedRollover
+        trActiveDay := trChartDay
+        trTradingDate := time_tradingday
+        trDayHigh := high
+        trDayLow := low
+        trPreviousClose := na
+        trPricesOK := trPriceOK
+    else
+        trPricesOK := trPricesOK and trPriceOK
+        trDayHigh := math.max(trDayHigh, high)
+        trDayLow := math.min(trDayLow, low)
+    bool trReferenceOK = not na(dailyPrevClose) and not na(dailyPrevEnd) and dailyStart == trActiveDay and dailyPrevEnd <= time
+    if na(trPreviousClose) and trReferenceOK
+        trPreviousClose := dailyPrevClose
+    trAsOf := barstate.isrealtime ? math.min(timenow, time_close) : time_close
+    dayRangeStatus := not trFullStart ? "PARTIAL FIRST DAY" : not trPricesOK ? "INVALID PRICE" : "OK"
+    dayRangeWidth := dayRangeStatus == "OK" ? trDayHigh - trDayLow : na
+    dayTRStatus := dayRangeStatus != "OK" ? dayRangeStatus : na(trPreviousClose) ? "NO ALIGNED PREV D CLOSE" : "OK"
+    dayTR := dayTRStatus == "OK" ? f_true_range(trDayHigh, trDayLow, trPreviousClose) : na
+    float trIdentity = not na(trPreviousClose) ? math.max(trDayHigh, trPreviousClose) - math.min(trDayLow, trPreviousClose) : na
+    bool trMathOK = not na(dayTR) and not na(trIdentity) and math.abs(dayTR - trIdentity) <= math.max(syminfo.mintick * 0.001, 1e-8)
+    if dayTRStatus == "OK" and not trMathOK
+        dayTRStatus := "MATH CHECK FAILED"
+        dayTR := na
+else
+    dayRangeWidth := na
+    dayTR := na
+    dayRangeStatus := "USE INTRADAY / 1D"
+    dayTRStatus := dayRangeStatus
+// Normal rollback rebuilds from the prior committed bar on every current update.
+// No varip summation of bar ranges; no moving or predictive range projections.
+
+// ── DAILY Traditional pivot points: P / R1 / S1 ONLY ───────────────────────────
+// Official formulas: tradingview.com/support/solutions/43000521824/
+// HTF prices use [1] + lookahead_on: previous completed DAILY values, not
+// high[1]/low[1] from the chart timeframe and not the developing daily candle.
+// Unshifted daily time below is a period identity, NOT future price information.
+// Native daily data is deliberate: stocks generally exclude extended-hours
+// trades; futures daily bars may use ETH and settlement as close. Those levels
+// can differ from pivots rebuilt from an intraday-only RTH session.
+bool pivotPricesOK = not na(dailyPrevHigh) and not na(dailyPrevLow) and not na(dailyPrevClose) and dailyPrevHigh >= dailyPrevLow
+bool pivotTimesOK = not na(dailyStart) and not na(dailyPrevStart) and not na(dailyPrevEnd) and dailyPrevStart < dailyStart and dailyPrevEnd <= time
+bool pivotReadyBase = trTimeframeOK and pivotPricesOK and pivotTimesOK
+float pivotRawP = pivotReadyBase ? (dailyPrevHigh + dailyPrevLow + dailyPrevClose) / 3.0 : na
+float pivotRawR1 = pivotReadyBase ? 2.0 * pivotRawP - dailyPrevLow : na
+float pivotRawS1 = pivotReadyBase ? 2.0 * pivotRawP - dailyPrevHigh : na
+// Arithmetic regression guard. Reverse the displayed formulas back into H/L/C.
+// This should be exact apart from floating-point noise; if future edits break a
+// formula, the pivot is withheld instead of silently drawing a wrong level.
+float pivotAuditHigh = pivotReadyBase ? 2.0 * pivotRawP - pivotRawS1 : na
+float pivotAuditLow = pivotReadyBase ? 2.0 * pivotRawP - pivotRawR1 : na
+float pivotAuditClose = pivotReadyBase ? 3.0 * pivotRawP - dailyPrevHigh - dailyPrevLow : na
+float pivotTol = math.max(syminfo.mintick * 0.001, 1e-8)
+bool pivotMathOK = pivotReadyBase and math.abs(pivotAuditHigh - dailyPrevHigh) <= pivotTol and math.abs(pivotAuditLow - dailyPrevLow) <= pivotTol and math.abs(pivotAuditClose - dailyPrevClose) <= pivotTol
+// Close normally sits inside that day's H/L. Do not make this a hard failure for
+// futures because settlement can legitimately differ from the last traded print.
+bool pivotCloseInside = pivotReadyBase and dailyPrevClose >= dailyPrevLow - syminfo.mintick and dailyPrevClose <= dailyPrevHigh + syminfo.mintick
+bool pivotSourceSanityOK = syminfo.type == "futures" ? pivotReadyBase : pivotCloseInside
+bool pivotReady = pivotReadyBase and pivotMathOK and pivotSourceSanityOK
+string pivotStatus = not trTimeframeOK ? "USE INTRADAY / 1D" : not pivotPricesOK ? "NO VALID PREV DAILY HLC" : not pivotTimesOK ? "DAILY TIME CHECK" : not pivotMathOK ? "PIVOT MATH CHECK FAILED" : not pivotSourceSanityOK ? "PREV CLOSE OUTSIDE H/L" : "OK"
+float dailyP = pivotReady ? pivotRawP : na
+float dailyR1 = pivotReady ? pivotRawR1 : na
+float dailyS1 = pivotReady ? pivotRawS1 : na
+string pivotDate = na(dailyStart) ? "N/A" : str.format_time(dailyStart, "yyyy-MM-dd HH:mm", syminfo.timezone)
+string pivotSourceDate = na(dailyPrevStart) ? "N/A" : str.format_time(dailyPrevStart, "yyyy-MM-dd HH:mm", syminfo.timezone)
+string pivotTip = "Traditional DAILY P=(H+L+C)/3; R1=2P-L; S1=2P-H. Native previous completed 1D source: " + syminfo.tickerid + ". Active daily period starts " + pivotDate + "; previous daily bar starts " + pivotSourceDate + " " + syminfo.timezone + ". Exact source H=" + f_price(dailyPrevHigh) + "; L=" + f_price(dailyPrevLow) + "; C=" + f_price(dailyPrevClose) + ". Arithmetic audit reverses P/R1/S1 back to H/L/C before levels are released. Non-futures also require previous close to sit inside H/L within one minimum tick. No current-price input; no right-side confirmation delay. Intraday timeframe changes do not change the DAILY basis. Native daily feeds can differ from intraday-session OHLC; futures close may be settlement. Independent of custom volume session. Only reference levels, not orders, predicted day limits or extra MOM gates. Status: " + pivotStatus
+
+// Three reusable lines on the PRICE chart. Mid-chart text labels are deliberately
+// removed. Separate scale-only plots below create clean right-axis price tags.
+// bar_time coordinates support long intraday histories without bar_index limits.
+// Only the latest daily set is shown; older days are not retroactively painted.
+var line pLine = na
+var line r1Line = na
+var line s1Line = na
+if barstate.islast
+    if showPivots and pivotReady
+        int levelStart = math.min(dailyStart, time)
+        int levelEnd = time_close
+        if na(pLine)
+            pLine := line.new(levelStart, dailyP, levelEnd, dailyP, xloc=xloc.bar_time, extend=extend.right, color=pivotPColor, width=2, force_overlay=true)
+            r1Line := line.new(levelStart, dailyR1, levelEnd, dailyR1, xloc=xloc.bar_time, extend=extend.right, color=pivotRColor, width=1, style=line.style_solid, force_overlay=true)
+            s1Line := line.new(levelStart, dailyS1, levelEnd, dailyS1, xloc=xloc.bar_time, extend=extend.right, color=pivotSColor, width=1, style=line.style_solid, force_overlay=true)
+        else
+            line.set_xy1(pLine, levelStart, dailyP)
+            line.set_xy2(pLine, levelEnd, dailyP)
+            line.set_xy1(r1Line, levelStart, dailyR1)
+            line.set_xy2(r1Line, levelEnd, dailyR1)
+            line.set_xy1(s1Line, levelStart, dailyS1)
+            line.set_xy2(s1Line, levelEnd, dailyS1)
+    else
+        if not na(pLine)
+            line.delete(pLine)
+            pLine := na
+        if not na(r1Line)
+            line.delete(r1Line)
+            r1Line := na
+        if not na(s1Line)
+            line.delete(s1Line)
+            s1Line := na
+
+// Local chart MOM/EMA drawings. These are NOT the strategy-context curves.
+color liveMOMColor = f_move_color(momArrowChange)
+color liveMOM2Color = f_move_color(mom2ArrowChange)
+plot(showHistogram ? mom : na, "CHART MOM optional histogram", color=color.new(liveMOMColor,55), style=plot.style_columns, display=display.pane)
+plot(mom, "CHART MOM3 LIVE", color=liveMOMColor, linewidth=momLineWidth, style=plot.style_linebr, display=display.pane + display.data_window + display.price_scale)
+plot(showSecondMOM ? mom2 : na, "CHART MOM6 LIVE CTX", color=liveMOM2Color, linewidth=2, style=plot.style_linebr, display=display.pane + display.data_window + display.price_scale)
+hline(0, "MOM zero", color=color.new(chart.fg_color,30))
+plot(openRealtimeBar ? mom : na, "Local live endpoint", color=liveMOMColor, style=plot.style_circles, linewidth=4, display=display.pane)
+plot(showSecondMOM and openRealtimeBar ? mom2 : na, "Local context live endpoint", color=liveMOM2Color, style=plot.style_circles, linewidth=3, display=display.pane)
+plot(showEMA ? ema : na, "CHART EMA", color=emaColor, linewidth=2, force_overlay=true, display=display.pane)
+// Alternate plot segments prevent overnight joins on RTH-only charts.
+var int vwapPart = 0
+var int vwapSession = na
+if not na(sessionVWAP) and (na(vwapSession) or vwapSession != expectedSessionStart)
+    vwapPart := 1 - vwapPart
+    vwapSession := expectedSessionStart
+float vwapPoint = showVWAP and vwapInThisBar ? sessionVWAP : na
+plot(vwapPart == 0 ? vwapPoint : na, "Session VWAP A", color=vwapColor, linewidth=2, style=plot.style_linebr, force_overlay=true, display=display.pane)
+plot(vwapPart == 1 ? vwapPoint : na, "Session VWAP B", color=vwapColor, linewidth=2, style=plot.style_linebr, force_overlay=true, display=display.pane)
+
+// Right-axis price tags for the current Daily Pivot set. display.price_scale keeps
+// these plots off the chart body while exposing clean native-style price boxes.
+plot(showPivots and pivotReady ? dailyP : na, "Daily P price tag", color=pivotPColor, force_overlay=true, display=display.price_scale)
+plot(showPivots and pivotReady ? dailyR1 : na, "Daily R1 price tag", color=pivotRColor, force_overlay=true, display=display.price_scale)
+plot(showPivots and pivotReady ? dailyS1 : na, "Daily S1 price tag", color=pivotSColor, force_overlay=true, display=display.price_scale)
+
+// ONE selected daily band; raw width=raw upper-lower (display uses tick rounding).
+bool gapAwareBand = dayBandMode == "True Range (gap included)"
+string selectedBandStatus = gapAwareBand ? dayTRStatus : dayRangeStatus
+bool selectedBandReady = selectedBandStatus == "OK"
+float selectedBandLow = not selectedBandReady ? na : gapAwareBand ? math.min(trDayLow, trPreviousClose) : trDayLow
+float selectedBandHigh = not selectedBandReady ? na : gapAwareBand ? math.max(trDayHigh, trPreviousClose) : trDayHigh
+float selectedBandWidth = selectedBandReady ? selectedBandHigh - selectedBandLow : na
+string bandName = gapAwareBand ? "Daily TR" : "Day L-H"
+string trDate = na(trTradingDate) ? "" : str.format_time(trTradingDate, "MM-dd", "Etc/UTC")
+string bandText = selectedBandReady ? f_price(selectedBandLow) + " - " + f_price(selectedBandHigh) + " (" + f_price(selectedBandWidth) + " pts)" : "N/A | " + selectedBandStatus
+string bandTip = "Definition: " + dayBandMode + ". Actual day LOW=" + f_price(trDayLow) + "; HIGH=" + f_price(trDayHigh) + "; H-L=" + f_price(dayRangeWidth) + "; prior native DAILY close=" + f_price(trPreviousClose) + "; True Range=" + f_price(dayTR) + ". TRUE RANGE bounds=min(L,prior close)..max(H,prior close), so one bound may lie outside today's actual trading. Optional Actual Low-High excludes the gap. Row and the two lines ALWAYS use the same selected bounds. Current-day references only; NOT projected targets, entry prices or hindsight trade signals. Updated through available chart data at " + f_time(trAsOf) + " " + zone + ". Source day/session follows the chart, not the custom volume session. Missing bars cannot be reconstructed; futures prior daily close may be settlement. Status: " + selectedBandStatus
+
+var line dayLowerLine = na
+var line dayUpperLine = na
+if barstate.islast
+    if showDayBand and selectedBandReady and not na(trActiveDay)
+        int bx = math.min(trActiveDay, time)
+        if na(dayLowerLine)
+            dayLowerLine := line.new(bx, selectedBandLow, time_close, selectedBandLow, xloc=xloc.bar_time, extend=extend.right, color=dayBandColor, width=1, style=line.style_dotted, force_overlay=true)
+            dayUpperLine := line.new(bx, selectedBandHigh, time_close, selectedBandHigh, xloc=xloc.bar_time, extend=extend.right, color=dayBandColor, width=1, style=line.style_dotted, force_overlay=true)
+        else
+            line.set_xy1(dayLowerLine, bx, selectedBandLow)
+            line.set_xy2(dayLowerLine, time_close, selectedBandLow)
+            line.set_xy1(dayUpperLine, bx, selectedBandHigh)
+            line.set_xy2(dayUpperLine, time_close, selectedBandHigh)
+    else
+        if not na(dayLowerLine)
+            line.delete(dayLowerLine)
+            dayLowerLine := na
+        if not na(dayUpperLine)
+            line.delete(dayUpperLine)
+            dayUpperLine := na
+// Right-axis tags for the selected current-day range/TR boundaries.
+plot(showDayBand and selectedBandReady ? selectedBandLow : na, "Daily band lower price tag", color=dayBandColor, force_overlay=true, display=display.price_scale)
+plot(showDayBand and selectedBandReady ? selectedBandHigh : na, "Daily band upper price tag", color=dayBandColor, force_overlay=true, display=display.price_scale)
+
+// Table labels explicitly separate strategy calculations from local readings.
+string updateTip = "SQ+ v2.3.0 | " + syminfo.tickerid + ". Strategy " + strategyTFText + "; chart " + tfText + ". Raw values develop with available data. Historical HTF series show confirmed snapshots; LTF snapshots on larger charts do not contain every event. Not a tick replay. Delayed subscriptions remain delayed. Internal validity checks remain even though there is no freshness row."
+string modeTip = "STRATEGY ONLY: " + directionMode + " on " + strategyTFText + ". MOM=" + f_mom(strategyMOM) + "; CVD Δ" + str.tostring(cvdLen) + "=" + f_vol(strategyChange) + "; EMA=" + f_price(strategyEMA) + ". " + strategyWhy + ". The local MOM/Delta/ADX rows below belong to Chart Direction, not this row. Only this row can notify. 15m is the compatibility baseline, not a proven best timeframe. " + updateTip
+string chartTip = "CHART ONLY: " + directionMode + " on " + tfText + ". Uses the local MOM3 and local CVD change; EMA/VWAP required only if selected. No agreement/veto against Strategy Direction. No local alerts. " + chartWhy + ". " + updateTip
+string momTip = "Local chart MOM(" + str.tostring(momLen) + ") = " + f_price(localClose) + " - " + f_price(momRef) + ". Raw signed points; feeds Chart Direction only. Movement compares current local MOM to previous completed chart MOM, not previous tick. Negative+rising=RECOVERING; positive+rising=STRENGTHENING; positive+falling=FADING; negative+falling=DETERIORATING. " + str.tostring(momMoveAtrFrac*100.0,"0.##") + "% of local ATR14 is a WORDING deadband, not a sign/Direction threshold. " + updateTip
+string mom2Tip = "Local context MOM(" + str.tostring(mom2Len) + ") = " + f_price(localClose) + " - " + f_price(mom2Ref) + ". Same movement wording as MOM3. This does not veto either Direction. On a 1h chart MOM3/6 have nominal 3/6-bar-hour spans, unlike the independently selected strategy basis. Gaps and shortened session bars alter elapsed time. " + updateTip
+string flowTip = (flowProxy ? "EXPLICIT PROXY " + flowTicker + ". " : "NATIVE " + flowTicker + ". ") + "1m candle-direction volume ESTIMATE, not bid/ask-classified executions or option Greeks. Delta covers the current " + tfText + " chart interval/session overlap. Total CVD is session-to-date. Δ" + str.tostring(cvdLen) + " uses " + str.tostring(cvdLen) + " CHART bars; Strategy computes a separate lookback. Same-session history=" + str.tostring(cvdHistoryBars) + ". Never borrow yesterday's CVD. " + flowStatus
+string volumeTip = "Native " + syminfo.tickerid + " 1m data in " + sessionHours + " " + zone + ". VWAP=sum(1m HLC3*V)/sum(V), reset per session. RVOL mode=" + rvolMode + "; prior complete sessions=" + str.tostring(rvolN) + "; median baseline (NOT the standard indicator's mean). BAR mode subtracts cumulative volume before the current chart interval from both numerator and each historical sample. SESSION mode does not subtract. Historical progress inside the current minute is linearly interpolated: estimate, not tick-exact history. Missing/zero denominator remains N/A. No Direction gate. " + (isIndex ? "Index provider volume is reference only; no ETF price/volume substitution." : "")
+string rvolText = na(rvol) ? "N/A | " + rvolStatus : (volumeIsReference ? "LAST " : "") + f_num(rvol) + "x"
+string flowPrefix = barstate.isrealtime and timenow < time_close ? "LIVE " : ""
+string rvolLabel = (rvolMode == "Chart bar" ? "RVOL BAR [" + tfText + "]" : "RVOL SESSION") + (isIndex ? "* EST" : " EST")
+
+var label vwapLabel = na
+if barstate.islast
+    if showVWAP and showVWAPLabel and sessionTF
+        string value = (isIndex ? "VWAP IDX-VOL* " : "VWAP ") + (na(sessionVWAP) ? "N/A | " + vwapStatus : (volumeIsReference ? "LAST " : "") + f_price(sessionVWAP))
+        float y = na(sessionVWAP) ? close : sessionVWAP
+        if na(vwapLabel)
+            vwapLabel := label.new(bar_index+2, y, value, style=label.style_label_left, color=color.new(chart.bg_color,8), textcolor=vwapColor, force_overlay=true, tooltip=volumeTip)
+        else
+            label.set_xy(vwapLabel,bar_index+2,y)
+            label.set_text(vwapLabel,value)
+            label.set_tooltip(vwapLabel,volumeTip)
+    else if not na(vwapLabel)
+        label.delete(vwapLabel)
+        vwapLabel := na
+
+int usedRows = 3 + (showSecondMOM ? 1 : 0) + (compactTable ? 0 : 1) + (showEMArow ? 1 : 0) + (showVWAProw ? 1 : 0) + (showADXrow ? 1 : 0) + (showFlow ? 2 : 0) + (showPivotRow ? 1 : 0) + (showDayBandRow ? 1 : 0) + (showRiskGuide ? 1 : 0) + (showRVOLrow ? 1 : 0)
+var table panel = table.new(panelPosition,2,usedRows,bgcolor=chart.bg_color,frame_color=color.new(chart.fg_color,65),frame_width=1,force_overlay=true)
+if barstate.islast
+    if showTable
+        int r = 0
+        f_row(panel,r,"STRATEGY DIR ["+strategyTFText+"]",strategyDirection == 0 ? "WAIT | "+strategyWhy : f_bias(strategyDirection),f_color(strategyDirection),modeTip)
+        table.cell_set_bgcolor(panel,1,r,color.new(f_color(strategyDirection),85))
+        r += 1
+        f_row(panel,r,"CHART DIR ["+tfText+"]",chartDirection == 0 ? "WAIT | "+chartWhy : f_bias(chartDirection),f_color(chartDirection),chartTip)
+        r += 1
+        if not compactTable
+            f_row(panel,r,"RULE - RESEARCH",directionMode+flowSuffix,chart.fg_color,modeTip)
+            r += 1
+        f_row(panel,r,"LIVE MOM "+str.tostring(momLen)+" ["+tfText+"]",f_mom_display(mom,momArrowChange),liveMOMColor,momTip)
+        r += 1
+        if showSecondMOM
+            f_row(panel,r,"LIVE MOM "+str.tostring(mom2Len)+" ["+tfText+" CTX]",f_mom_display(mom2,mom2ArrowChange),liveMOM2Color,mom2Tip)
+            r += 1
+        if showEMArow
+            f_row(panel,r,"EMA "+str.tostring(emaLen)+" ["+tfText+"]",na(ema) ? "N/A" : (close>ema ? "ABOVE " : close<ema ? "BELOW " : "AT ")+f_price(ema),chart.fg_color,"Local chart EMA, not strategy EMA. "+chartTip)
+            r += 1
+        if showVWAProw
+            string pos = na(sessionVWAP) ? "" : close>sessionVWAP ? " | PRICE ABOVE" : close<sessionVWAP ? " | PRICE BELOW" : " | PRICE AT"
+            f_row(panel,r,isIndex ? "VWAP SESSION*" : "VWAP SESSION",na(sessionVWAP) ? "N/A | "+vwapStatus : (volumeIsReference ? "LAST " : "")+f_price(sessionVWAP)+pos,vwapColor,volumeTip)
+            r += 1
+        if showADXrow
+            float moveRaw = adx - adxPrevious
+            float move = na(moveRaw) ? na : math.abs(moveRaw)<0.10 ? 0.0 : moveRaw
+            f_row(panel,r,"ADX "+str.tostring(diLen)+" ["+tfText+"]",f_adx_strength(adx,move,plusDI,minusDI),plusDI>minusDI ? color.teal : minusDI>plusDI ? color.red : color.gray,"Local DMI pressure side plus ADX strength. Conventional 20/25 bands are descriptive, not a validated trade gate. Strength change compares previous closed chart bar, deadband0.10. ADX never gates Direction.")
+            r += 1
+        if showFlow
+            f_row(panel,r,"Delta ["+tfText+"]"+flowSuffix+" EST",na(barDelta) ? "N/A | "+flowStatus : flowPrefix+f_vol(barDelta),na(barDelta) ? color.gray : barDelta>=0 ? color.teal : color.red,flowTip)
+            r += 1
+            bool hasChange = flowClockAligned and not na(cvdRecentChange)
+            string cvdText = na(sessionCVD) ? "N/A | "+flowStatus : f_vol(sessionCVD)+(hasChange ? " | Δ"+str.tostring(cvdLen)+" ["+tfText+"] "+f_vol(cvdRecentChange) : " | Δ"+str.tostring(cvdLen)+" WARMUP")
+            color cvdColor = hasChange ? (cvdRecentChange>=0 ? color.teal : color.red) : color.gray
+            f_row(panel,r,"CVD SESSION"+flowSuffix+" EST",cvdText,cvdColor,flowTip)
+            r += 1
+        if showPivotRow
+            f_row(panel,r,"Daily P / R1 / S1",pivotReady ? f_price(dailyP)+" / "+f_price(dailyR1)+" / "+f_price(dailyS1)+" | CALC OK" : "N/A | "+pivotStatus,pivotReady ? chart.fg_color : color.orange,pivotTip)
+            r += 1
+        if showDayBandRow
+            f_row(panel,r,bandName+" "+trDate,bandText,selectedBandReady ? chart.fg_color : color.gray,bandTip)
+            r += 1
+        if showRiskGuide
+            f_row(panel,r,"RISK PREVIEW 15m",riskGuide,chart.fg_color,riskTip)
+            r += 1
+        if showRVOLrow
+            f_row(panel,r,rvolLabel,rvolText,chart.fg_color,volumeTip)
+            r += 1
+    else
+        table.clear(panel,0,0,1,usedRows-1)
+
+// Local MOM pane, no additional bias or freshness rows.
+var table paneBadge = table.new(position.top_left,1,2,bgcolor=color.new(chart.bg_color,10))
+var label momEndLabel = na
+var label mom2EndLabel = na
+if barstate.islast
+    if showPaneBadge
+        table.cell(paneBadge,0,0,"MOM "+str.tostring(momLen)+" ["+tfText+"] | "+f_mom_display(mom,momArrowChange),text_color=liveMOMColor,text_size=size.small,text_halign=text.align_left,tooltip=momTip)
+        table.cell(paneBadge,0,1,showSecondMOM ? "MOM "+str.tostring(mom2Len)+" ["+tfText+" CTX] | "+f_mom_display(mom2,mom2ArrowChange) : "",text_color=liveMOM2Color,text_size=size.small,text_halign=text.align_left,tooltip=mom2Tip)
+        if momReady
+            if na(momEndLabel)
+                momEndLabel := label.new(bar_index+2,mom,"M"+str.tostring(momLen)+" "+f_mom(mom),style=label.style_label_left,color=color.new(chart.bg_color,12),textcolor=liveMOMColor,size=size.small)
+            else
+                label.set_xy(momEndLabel,bar_index+2,mom)
+                label.set_text(momEndLabel,"M"+str.tostring(momLen)+" "+f_mom(mom))
+                label.set_textcolor(momEndLabel,liveMOMColor)
+        if showSecondMOM and mom2Ready
+            if na(mom2EndLabel)
+                mom2EndLabel := label.new(bar_index+4,mom2,"M"+str.tostring(mom2Len)+" "+f_mom(mom2),style=label.style_label_left,color=color.new(chart.bg_color,12),textcolor=liveMOM2Color,size=size.small)
+            else
+                label.set_xy(mom2EndLabel,bar_index+4,mom2)
+                label.set_text(mom2EndLabel,"M"+str.tostring(mom2Len)+" "+f_mom(mom2))
+                label.set_textcolor(mom2EndLabel,liveMOM2Color)
+    else
+        table.clear(paneBadge,0,0,0,1)
+    if not showPaneBadge or not momReady
+        if not na(momEndLabel)
+            label.delete(momEndLabel)
+            momEndLabel := na
+    if not showPaneBadge or not showSecondMOM or not mom2Ready
+        if not na(mom2EndLabel)
+            label.delete(mom2EndLabel)
+            mom2EndLabel := na
+
+// Data-window audit, not more visible table rows.
+plot(strategyDirection,"STRATEGY Direction 1/0/-1",display=display.data_window)
+plot(chartDirection,"CHART Direction 1/0/-1",display=display.data_window)
+plot(strategyMOM,"STRATEGY MOM3",display=display.data_window)
+plot(strategyChange,"STRATEGY CVD change EST",display=display.data_window)
+plot(strategyEMA,"STRATEGY EMA",display=display.data_window)
+plot(strategyReady ? 1 : 0,"Strategy data ready",display=display.data_window)
+plot(chartReady ? 1 : 0,"Chart data ready",display=display.data_window)
+plot(momRef,"Local MOM reference",display=display.data_window)
+plot(mom2Ref,"Local MOM6 reference",display=display.data_window)
+plot(barDelta,"Local Delta EST",display=display.data_window)
+plot(sessionCVD,"Session CVD EST",display=display.data_window)
+plot(cvdRecentChange,"Local CVD change EST",display=display.data_window)
+plot(rvol,"RVOL selected interval median estimate",display=display.data_window)
+plot(sessionVWAP,"Native session VWAP",display=display.data_window)
+plot(dayTR,"Daily true range",display=display.data_window)
+plot(dailyP,"Daily Traditional P",display=display.data_window)
+plot(dailyR1,"Daily Traditional R1",display=display.data_window)
+plot(dailyS1,"Daily Traditional S1",display=display.data_window)
+
+// Native TradingView compilation and live/reload checks are still required.
+// Saved alerts retain a snapshot of script/settings: recreate them for this version.
+// No API keys are needed in Pine. Alpaca was used only for an external diagnostic.
